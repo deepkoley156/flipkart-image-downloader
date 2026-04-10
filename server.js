@@ -14,11 +14,8 @@ function cleanUrl(url) {
   if (!url) return "";
 
   let cleaned = url.replace(/&amp;/g, "&").trim();
-
-  // Remove query for better duplicate matching
   cleaned = cleaned.split("?")[0];
 
-  // Normalize image sizes to higher size for duplicate control
   cleaned = cleaned.replace(
     /\/(60|100|128|256|312|416|612|832|1000|2000)\/(60|100|128|256|312|416|612|832|1000|2000)\//g,
     "/832/832/"
@@ -34,7 +31,6 @@ function isValidProductImage(url) {
   if (!u.includes("flixcart.com")) return false;
   if (!/\.(jpg|jpeg|png|webp)$/i.test(u)) return false;
 
-  // reject non-product/common bad images
   if (u.includes("logo")) return false;
   if (u.includes("captcha")) return false;
   if (u.includes("recaptcha")) return false;
@@ -51,7 +47,6 @@ function isValidProductImage(url) {
   if (u.includes("review")) return false;
   if (u.includes("rating")) return false;
 
-  // reject tiny image sizes
   if (u.includes("/60/60/")) return false;
   if (u.includes("/100/100/")) return false;
   if (u.includes("/128/128/")) return false;
@@ -69,15 +64,10 @@ function scoreImage(url) {
   if (u.includes("/612/612/")) score += 120;
   if (u.includes("/416/416/")) score += 80;
   if (u.includes("/312/312/")) score += 40;
-  if (u.includes("/256/256/")) score += 20;
 
-  if (u.includes("/128/128/")) score -= 100;
-  if (u.includes("/100/100/")) score -= 150;
-  if (u.includes("/60/60/")) score -= 200;
-
+  if (u.includes("product")) score += 20;
+  if (u.includes("gallery")) score += 20;
   if (u.includes("image")) score += 10;
-  if (u.includes("product")) score += 10;
-  if (u.includes("gallery")) score += 10;
 
   return score;
 }
@@ -89,6 +79,21 @@ function getMetaContent(html, key, attr = "property") {
   );
   const match = html.match(regex);
   return match ? cleanUrl(match[1]) : "";
+}
+
+function dedupeImages(images) {
+  const out = [];
+  const seen = new Set();
+
+  for (const img of images) {
+    const fileName = (img.split("/").pop() || "").toLowerCase();
+    const key = fileName.replace(/\.(jpg|jpeg|png|webp)$/i, "");
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(img);
+  }
+
+  return out;
 }
 
 async function extractFlipkartData(url) {
@@ -137,27 +142,72 @@ async function extractFlipkartData(url) {
       throw new Error("Flipkart blocked this request with CAPTCHA");
     }
 
-    const imageUrls = await page.evaluate(() => {
-      const urls = new Set();
+    const extracted = await page.evaluate(() => {
+      const normalize = (u) => (u || "").replace(/&amp;/g, "&").trim();
 
-      document.querySelectorAll("img").forEach((img) => {
-        if (img.src) urls.add(img.src);
+      const addFromImg = (img, set) => {
+        if (!img) return;
+
+        if (img.src) set.add(normalize(img.src));
 
         const srcset = img.getAttribute("srcset");
         if (srcset) {
           srcset.split(",").forEach((part) => {
             const u = part.trim().split(" ")[0];
-            if (u) urls.add(u);
+            if (u) set.add(normalize(u));
           });
+        }
+      };
+
+      const mainSet = new Set();
+      const fallbackSet = new Set();
+
+      // Try highly likely main gallery containers first
+      const selectors = [
+        'div[class*="_2E1FGS"] img',
+        'div[class*="_1AtVbE"] img',
+        'div[class*="_396cs4"]',
+        'div[class*="_3kidJX"] img',
+        'div[class*="_2r_T1I"] img',
+        'div[class*="_1BweB8"] img',
+        'img[class*="_396cs4"]',
+        'img[class*="_2r_T1I"]'
+      ];
+
+      selectors.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((el) => {
+          if (el.tagName.toLowerCase() === "img") {
+            addFromImg(el, mainSet);
+          }
+        });
+      });
+
+      // Also inspect nearby gallery thumbnails only
+      document.querySelectorAll("ul img, li img").forEach((img) => {
+        const rect = img.getBoundingClientRect();
+        if (rect.width >= 40 && rect.height >= 40) {
+          addFromImg(img, fallbackSet);
         }
       });
 
+      // Fallback: all images, but only bigger ones
+      document.querySelectorAll("img").forEach((img) => {
+        const rect = img.getBoundingClientRect();
+        if (rect.width >= 180 || rect.height >= 180) {
+          addFromImg(img, fallbackSet);
+        }
+      });
+
+      // Raw HTML flixcart URLs
       const htmlText = document.documentElement.outerHTML;
       const rawMatches =
         htmlText.match(/https?:\/\/(?:rukmini|rukminim)\d*\.flixcart\.com\/[^"' <>\s)]+/gi) || [];
-      rawMatches.forEach((u) => urls.add(u));
+      rawMatches.forEach((u) => fallbackSet.add(normalize(u)));
 
-      return Array.from(urls);
+      return {
+        main: Array.from(mainSet),
+        fallback: Array.from(fallbackSet)
+      };
     });
 
     const metaCandidates = [
@@ -165,39 +215,40 @@ async function extractFlipkartData(url) {
       getMetaContent(html, "twitter:image", "name")
     ].filter(Boolean);
 
-    const allCandidates = [...new Set([...imageUrls, ...metaCandidates])]
+    let mainImages = extracted.main
       .map(cleanUrl)
-      .filter(Boolean);
-
-    const cleaned = [...new Set(allCandidates)]
+      .filter(Boolean)
       .filter(isValidProductImage)
       .sort((a, b) => scoreImage(b) - scoreImage(a));
 
-    const finalImages = [];
-    const seenKeys = new Set();
+    mainImages = dedupeImages(mainImages);
 
-    for (const img of cleaned) {
-      const parts = img.split("/");
-      const fileName = (parts[parts.length - 1] || "").toLowerCase();
-      const key = fileName.replace(/\.(jpg|jpeg|png|webp)$/i, "");
+    let fallbackImages = [...extracted.fallback, ...metaCandidates]
+      .map(cleanUrl)
+      .filter(Boolean)
+      .filter(isValidProductImage)
+      .sort((a, b) => scoreImage(b) - scoreImage(a));
 
-      if (!key) continue;
-      if (seenKeys.has(key)) continue;
+    fallbackImages = dedupeImages(fallbackImages);
 
-      seenKeys.add(key);
-      finalImages.push(img);
+    // Prefer main gallery images. Only use fallback if main not enough.
+    let finalImages = mainImages;
+
+    if (finalImages.length < 2) {
+      finalImages = dedupeImages([...mainImages, ...fallbackImages]);
     }
 
-    const filteredMainImages = finalImages.slice(0, 8);
+    // Remove obvious unrelated category/product contamination by limiting count
+    finalImages = finalImages.slice(0, 6);
 
-    if (!filteredMainImages.length) {
+    if (!finalImages.length) {
       throw new Error("No valid product images found");
     }
 
     return {
       title,
       finalUrl,
-      images: filteredMainImages
+      images: finalImages
     };
   } finally {
     await browser.close();
