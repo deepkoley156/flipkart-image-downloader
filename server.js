@@ -12,7 +12,19 @@ app.use(express.static(path.join(__dirname, "public")));
 
 function cleanUrl(url) {
   if (!url) return "";
-  return url.replace(/&amp;/g, "&").trim();
+
+  let cleaned = url.replace(/&amp;/g, "&").trim();
+
+  // Remove query for better duplicate matching
+  cleaned = cleaned.split("?")[0];
+
+  // Normalize image sizes to higher size for duplicate control
+  cleaned = cleaned.replace(
+    /\/(60|100|128|256|312|416|612|832|1000|2000)\/(60|100|128|256|312|416|612|832|1000|2000)\//g,
+    "/832/832/"
+  );
+
+  return cleaned;
 }
 
 function isValidProductImage(url) {
@@ -20,8 +32,9 @@ function isValidProductImage(url) {
   const u = url.toLowerCase();
 
   if (!u.includes("flixcart.com")) return false;
-  if (!/\.(jpg|jpeg|png|webp)(\?|$)/i.test(u)) return false;
+  if (!/\.(jpg|jpeg|png|webp)$/i.test(u)) return false;
 
+  // reject non-product/common bad images
   if (u.includes("logo")) return false;
   if (u.includes("captcha")) return false;
   if (u.includes("recaptcha")) return false;
@@ -30,10 +43,18 @@ function isValidProductImage(url) {
   if (u.includes("icon")) return false;
   if (u.includes("brand")) return false;
   if (u.includes("rewards")) return false;
+  if (u.includes("wishlist")) return false;
+  if (u.includes("compare")) return false;
+  if (u.includes("banner")) return false;
+  if (u.includes("offer")) return false;
+  if (u.includes("ads")) return false;
+  if (u.includes("review")) return false;
+  if (u.includes("rating")) return false;
+
+  // reject tiny image sizes
   if (u.includes("/60/60/")) return false;
   if (u.includes("/100/100/")) return false;
   if (u.includes("/128/128/")) return false;
-  if (u.includes("88011666-ce1d-40f0-a8eb-1bac7d164885")) return false;
 
   return true;
 }
@@ -42,13 +63,14 @@ function scoreImage(url) {
   const u = url.toLowerCase();
   let score = 0;
 
-  if (u.includes("/2000/2000/")) score += 200;
-  if (u.includes("/1000/1000/")) score += 150;
-  if (u.includes("/832/832/")) score += 120;
-  if (u.includes("/612/612/")) score += 100;
+  if (u.includes("/2000/2000/")) score += 300;
+  if (u.includes("/1000/1000/")) score += 220;
+  if (u.includes("/832/832/")) score += 180;
+  if (u.includes("/612/612/")) score += 120;
   if (u.includes("/416/416/")) score += 80;
-  if (u.includes("/312/312/")) score += 60;
-  if (u.includes("/256/256/")) score += 40;
+  if (u.includes("/312/312/")) score += 40;
+  if (u.includes("/256/256/")) score += 20;
+
   if (u.includes("/128/128/")) score -= 100;
   if (u.includes("/100/100/")) score -= 150;
   if (u.includes("/60/60/")) score -= 200;
@@ -147,18 +169,35 @@ async function extractFlipkartData(url) {
       .map(cleanUrl)
       .filter(Boolean);
 
-    const cleaned = allCandidates
+    const cleaned = [...new Set(allCandidates)]
       .filter(isValidProductImage)
       .sort((a, b) => scoreImage(b) - scoreImage(a));
 
-    if (!cleaned.length) {
+    const finalImages = [];
+    const seenKeys = new Set();
+
+    for (const img of cleaned) {
+      const parts = img.split("/");
+      const fileName = (parts[parts.length - 1] || "").toLowerCase();
+      const key = fileName.replace(/\.(jpg|jpeg|png|webp)$/i, "");
+
+      if (!key) continue;
+      if (seenKeys.has(key)) continue;
+
+      seenKeys.add(key);
+      finalImages.push(img);
+    }
+
+    const filteredMainImages = finalImages.slice(0, 8);
+
+    if (!filteredMainImages.length) {
       throw new Error("No valid product images found");
     }
 
     return {
       title,
       finalUrl,
-      images: cleaned
+      images: filteredMainImages
     };
   } finally {
     await browser.close();
@@ -214,9 +253,12 @@ app.post("/api/download-zip", async (req, res) => {
           }
         });
 
-        const extMatch = imageUrl.match(/\.(jpg|jpeg|png|webp)(\?|$)/i);
+        const extMatch = imageUrl.match(/\.(jpg|jpeg|png|webp)$/i);
         const ext = extMatch ? extMatch[1].toLowerCase() : "jpg";
-        archive.append(Buffer.from(response.data), { name: `image-${i + 1}.${ext}` });
+
+        archive.append(Buffer.from(response.data), {
+          name: `image-${i + 1}.${ext}`
+        });
       } catch (e) {
         console.log("Skipping image:", imageUrl);
       }
