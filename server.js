@@ -46,6 +46,8 @@ function isValidProductImage(url) {
   if (u.includes("ads")) return false;
   if (u.includes("review")) return false;
   if (u.includes("rating")) return false;
+  if (u.includes("seller")) return false;
+  if (u.includes("store")) return false;
 
   if (u.includes("/60/60/")) return false;
   if (u.includes("/100/100/")) return false;
@@ -59,14 +61,14 @@ function scoreImage(url) {
   let score = 0;
 
   if (u.includes("/2000/2000/")) score += 300;
-  if (u.includes("/1000/1000/")) score += 220;
+  if (u.includes("/1000/1000/")) score += 240;
   if (u.includes("/832/832/")) score += 180;
   if (u.includes("/612/612/")) score += 120;
   if (u.includes("/416/416/")) score += 80;
   if (u.includes("/312/312/")) score += 40;
 
+  if (u.includes("gallery")) score += 25;
   if (u.includes("product")) score += 20;
-  if (u.includes("gallery")) score += 20;
   if (u.includes("image")) score += 10;
 
   return score;
@@ -144,8 +146,10 @@ async function extractFlipkartData(url) {
 
     const extracted = await page.evaluate(() => {
       const normalize = (u) => (u || "").replace(/&amp;/g, "&").trim();
+      const mainSet = new Set();
+      const thumbSet = new Set();
 
-      const addFromImg = (img, set) => {
+      const addImg = (img, set) => {
         if (!img) return;
 
         if (img.src) set.add(normalize(img.src));
@@ -159,54 +163,40 @@ async function extractFlipkartData(url) {
         }
       };
 
-      const mainSet = new Set();
-      const fallbackSet = new Set();
-
-      // Try highly likely main gallery containers first
-      const selectors = [
+      // Try to find only the primary product media/gallery area
+      const mainGallerySelectors = [
         'div[class*="_2E1FGS"] img',
-        'div[class*="_1AtVbE"] img',
-        'div[class*="_396cs4"]',
         'div[class*="_3kidJX"] img',
-        'div[class*="_2r_T1I"] img',
         'div[class*="_1BweB8"] img',
+        'div[class*="_2r_T1I"] img',
         'img[class*="_396cs4"]',
         'img[class*="_2r_T1I"]'
       ];
 
-      selectors.forEach((selector) => {
-        document.querySelectorAll(selector).forEach((el) => {
-          if (el.tagName.toLowerCase() === "img") {
-            addFromImg(el, mainSet);
+      mainGallerySelectors.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((img) => addImg(img, mainSet));
+      });
+
+      // Limit thumbnail collection to likely gallery side only
+      const thumbContainers = [
+        'ul img',
+        'li img',
+        'div[class*="_1AuMiq"] img',
+        'div[class*="CXW8mj"] img'
+      ];
+
+      thumbContainers.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((img) => {
+          const rect = img.getBoundingClientRect();
+          if (rect.width >= 35 && rect.height >= 35 && rect.width <= 250 && rect.height <= 250) {
+            addImg(img, thumbSet);
           }
         });
       });
 
-      // Also inspect nearby gallery thumbnails only
-      document.querySelectorAll("ul img, li img").forEach((img) => {
-        const rect = img.getBoundingClientRect();
-        if (rect.width >= 40 && rect.height >= 40) {
-          addFromImg(img, fallbackSet);
-        }
-      });
-
-      // Fallback: all images, but only bigger ones
-      document.querySelectorAll("img").forEach((img) => {
-        const rect = img.getBoundingClientRect();
-        if (rect.width >= 180 || rect.height >= 180) {
-          addFromImg(img, fallbackSet);
-        }
-      });
-
-      // Raw HTML flixcart URLs
-      const htmlText = document.documentElement.outerHTML;
-      const rawMatches =
-        htmlText.match(/https?:\/\/(?:rukmini|rukminim)\d*\.flixcart\.com\/[^"' <>\s)]+/gi) || [];
-      rawMatches.forEach((u) => fallbackSet.add(normalize(u)));
-
       return {
         main: Array.from(mainSet),
-        fallback: Array.from(fallbackSet)
+        thumbs: Array.from(thumbSet)
       };
     });
 
@@ -223,23 +213,38 @@ async function extractFlipkartData(url) {
 
     mainImages = dedupeImages(mainImages);
 
-    let fallbackImages = [...extracted.fallback, ...metaCandidates]
+    let thumbImages = extracted.thumbs
       .map(cleanUrl)
       .filter(Boolean)
       .filter(isValidProductImage)
       .sort((a, b) => scoreImage(b) - scoreImage(a));
 
-    fallbackImages = dedupeImages(fallbackImages);
+    thumbImages = dedupeImages(thumbImages);
 
-    // Prefer main gallery images. Only use fallback if main not enough.
-    let finalImages = mainImages;
+    let metaImages = metaCandidates
+      .map(cleanUrl)
+      .filter(Boolean)
+      .filter(isValidProductImage)
+      .sort((a, b) => scoreImage(b) - scoreImage(a));
+
+    metaImages = dedupeImages(metaImages);
+
+    // STRICT PRIORITY:
+    // 1. main gallery images only
+    // 2. thumbnail gallery images only if needed
+    // 3. meta image only if still needed
+    let finalImages = dedupeImages(mainImages);
 
     if (finalImages.length < 2) {
-      finalImages = dedupeImages([...mainImages, ...fallbackImages]);
+      finalImages = dedupeImages([...finalImages, ...thumbImages]);
     }
 
-    // Remove obvious unrelated category/product contamination by limiting count
-    finalImages = finalImages.slice(0, 6);
+    if (finalImages.length < 1) {
+      finalImages = dedupeImages([...finalImages, ...metaImages]);
+    }
+
+    // Keep very strict limit to avoid related products
+    finalImages = finalImages.slice(0, 4);
 
     if (!finalImages.length) {
       throw new Error("No valid product images found");
