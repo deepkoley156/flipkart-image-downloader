@@ -1,1 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flipkart Image Downloader</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Arial, sans-serif;
+      background: #020817;
+      color: #fff;
+      padding: 20px;
+    }
+    .wrap {
+      max-width: 950px;
+      margin: 30px auto;
+    }
+    h1 {
+      font-size: 38px;
+      margin-bottom: 10px;
+    }
+    .sub {
+      color: #94a3b8;
+      line-height: 1.7;
+      font-size: 18px;
+      margin-bottom: 24px;
+    }
+    .box {
+      border: 1px solid rgba(255,255,255,0.08);
+      background: #061124;
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 0 20px rgba(0,255,255,0.06);
+    }
+    .input-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    input {
+      width: 100%;
+      padding: 18px;
+      border-radius: 12px;
+      border: 1px solid #1e293b;
+      background: #020617;
+      color: #fff;
+      font-size: 16px;
+      outline: none;
+    }
+    button {
+      width: 100%;
+      padding: 18px;
+      border: none;
+      border-radius: 12px;
+      background: #22b8d6;
+      color: white;
+      font-size: 16px;
+      font-weight: bold;
+      cursor: pointer;
+      box-shadow: 0 0 20px rgba(34,184,214,0.35);
+    }
+    button:hover {
+      opacity: 0.95;
+    }
+    .status {
+      margin-top: 18px;
+      line-height: 1.6;
+      font-size: 15px;
+    }
+    .error {
+      background: #ef4444;
+      color: white;
+      padding: 16px;
+      border-radius: 10px;
+      margin-bottom: 18px;
+    }
+    .success {
+      background: #16a34a;
+      color: white;
+      padding: 16px;
+      border-radius: 10px;
+      margin-bottom: 18px;
+    }
+    .result {
+      display: none;
+      margin-top: 22px;
+    }
+    .meta {
+      color: #cbd5e1;
+      margin-bottom: 20px;
+      line-height: 1.8;
+      word-break: break-all;
+    }
+    .actions {
+      margin-bottom: 20px;
+    }
+    .gallery {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: #081426;
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 16px;
+      padding: 12px;
+      text-align: center;
+    }
+    .card img {
+      width: 100%;
+      height: 220px;
+      object-fit: contain;
+      background: #fff;
+      border-radius: 12px;
+      padding: 8px;
+    }
+    .card a {
+      display: inline-block;
+      margin-top: 10px;
+      color: white;
+      text-decoration: none;
+      background: #111827;
+      padding: 10px 14px;
+      border-radius: 10px;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>Extract Product Images</h1>
+    <div class="sub">
+      Paste any Flipkart product URL to extract, view, and bulk-download all high-resolution listing images instantly.
+    </div>
 
+    <div id="messageBox"></div>
+
+    <div class="box">
+      <div class="input-wrap">
+        <input id="productUrl" type="text" placeholder="Paste Flipkart product URL" />
+        <button onclick="extractImages()">EXTRACT IMAGES</button>
+      </div>
+    </div>
+
+    <div class="status" id="status"></div>
+
+    <div class="result" id="result">
+      <div class="meta">
+        <div><strong>Title:</strong> <span id="productTitle"></span></div>
+        <div><strong>Final URL:</strong> <span id="finalUrl"></span></div>
+        <div><strong>Total Images:</strong> <span id="totalImages"></span></div>
+      </div>
+
+      <div class="actions">
+        <button onclick="downloadZip()">Download All as ZIP</button>
+      </div>
+
+      <div class="gallery" id="gallery"></div>
+    </div>
+  </div>
+
+  <script>
+    let extractedImages = [];
+    let extractedTitle = "flipkart-images";
+
+    function showMessage(type, title, text) {
+      const box = document.getElementById("messageBox");
+      box.innerHTML = `
+        <div class="${type}">
+          <strong>${title}</strong><br>
+          ${text}
+        </div>
+      `;
+    }
+
+    async function extractImages() {
+      const url = document.getElementById("productUrl").value.trim();
+      const status = document.getElementById("status");
+      const result = document.getElementById("result");
+      const gallery = document.getElementById("gallery");
+
+      document.getElementById("messageBox").innerHTML = "";
+      result.style.display = "none";
+      gallery.innerHTML = "";
+      extractedImages = [];
+
+      if (!url) {
+        showMessage("error", "Input required", "Please paste a Flipkart product URL.");
+        return;
+      }
+
+      try {
+        status.textContent = "Fetching product images... Please wait.";
+
+        const res = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          throw new Error(data.error || "Failed to extract images");
+        }
+
+        extractedImages = data.images || [];
+        extractedTitle = data.title || "flipkart-images";
+
+        document.getElementById("productTitle").textContent = extractedTitle;
+        document.getElementById("finalUrl").textContent = data.finalUrl || "";
+        document.getElementById("totalImages").textContent = extractedImages.length;
+
+        extractedImages.forEach((imgUrl, index) => {
+          const card = document.createElement("div");
+          card.className = "card";
+          card.innerHTML = `
+            <img src="${imgUrl}" alt="Image ${index + 1}">
+            <a href="${imgUrl}" target="_blank">View Full Size</a>
+          `;
+          gallery.appendChild(card);
+        });
+
+        result.style.display = "block";
+        status.textContent = "";
+        showMessage("success", "Images extracted", "Product images were fetched successfully.");
+      } catch (err) {
+        status.textContent = "";
+        showMessage("error", "Scraping failed", err.message);
+      }
+    }
+
+    async function downloadZip() {
+      if (!extractedImages.length) {
+        showMessage("error", "No images", "No images available for ZIP download.");
+        return;
+      }
+
+      try {
+        showMessage("success", "Preparing ZIP", "Your ZIP file is being prepared.");
+
+        const res = await fetch("/api/download-zip", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            images: extractedImages,
+            title: extractedTitle
+          })
+        });
+
+        if (!res.ok) {
+          let message = "ZIP download failed";
+          try {
+            const data = await res.json();
+            message = data.error || message;
+          } catch {}
+          throw new Error(message);
+        }
+
+        const blob = await res.blob();
+        const link = document.createElement("a");
+        const url = window.URL.createObjectURL(blob);
+        link.href = url;
+        link.download = (extractedTitle || "flipkart-images") + ".zip";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        window.URL.revokeObjectURL(url);
+
+        showMessage("success", "ZIP ready", "ZIP downloaded successfully.");
+      } catch (err) {
+        showMessage("error", "ZIP failed", err.message);
+      }
+    }
+  </script>
+</body>
+</html>
