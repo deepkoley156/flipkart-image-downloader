@@ -4,7 +4,8 @@
   "description": "Flipkart product image downloader",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "postinstall": "npx playwright install chromium"
   },
   "dependencies": {
     "archiver": "^7.0.1",
