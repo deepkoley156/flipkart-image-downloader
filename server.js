@@ -14,8 +14,11 @@ function cleanUrl(url) {
   if (!url) return "";
 
   let cleaned = url.replace(/&amp;/g, "&").trim();
+
+  // Remove query for better duplicate matching
   cleaned = cleaned.split("?")[0];
 
+  // Normalize image sizes to higher size for duplicate control
   cleaned = cleaned.replace(
     /\/(60|100|128|256|312|416|612|832|1000|2000)\/(60|100|128|256|312|416|612|832|1000|2000)\//g,
     "/832/832/"
@@ -31,6 +34,7 @@ function isValidProductImage(url) {
   if (!u.includes("flixcart.com")) return false;
   if (!/\.(jpg|jpeg|png|webp)$/i.test(u)) return false;
 
+  // reject non-product/common bad images
   if (u.includes("logo")) return false;
   if (u.includes("captcha")) return false;
   if (u.includes("recaptcha")) return false;
@@ -46,9 +50,8 @@ function isValidProductImage(url) {
   if (u.includes("ads")) return false;
   if (u.includes("review")) return false;
   if (u.includes("rating")) return false;
-  if (u.includes("seller")) return false;
-  if (u.includes("store")) return false;
 
+  // reject tiny image sizes
   if (u.includes("/60/60/")) return false;
   if (u.includes("/100/100/")) return false;
   if (u.includes("/128/128/")) return false;
@@ -61,15 +64,20 @@ function scoreImage(url) {
   let score = 0;
 
   if (u.includes("/2000/2000/")) score += 300;
-  if (u.includes("/1000/1000/")) score += 240;
+  if (u.includes("/1000/1000/")) score += 220;
   if (u.includes("/832/832/")) score += 180;
   if (u.includes("/612/612/")) score += 120;
   if (u.includes("/416/416/")) score += 80;
   if (u.includes("/312/312/")) score += 40;
+  if (u.includes("/256/256/")) score += 20;
 
-  if (u.includes("gallery")) score += 25;
-  if (u.includes("product")) score += 20;
+  if (u.includes("/128/128/")) score -= 100;
+  if (u.includes("/100/100/")) score -= 150;
+  if (u.includes("/60/60/")) score -= 200;
+
   if (u.includes("image")) score += 10;
+  if (u.includes("product")) score += 10;
+  if (u.includes("gallery")) score += 10;
 
   return score;
 }
@@ -81,21 +89,6 @@ function getMetaContent(html, key, attr = "property") {
   );
   const match = html.match(regex);
   return match ? cleanUrl(match[1]) : "";
-}
-
-function dedupeImages(images) {
-  const out = [];
-  const seen = new Set();
-
-  for (const img of images) {
-    const fileName = (img.split("/").pop() || "").toLowerCase();
-    const key = fileName.replace(/\.(jpg|jpeg|png|webp)$/i, "");
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    out.push(img);
-  }
-
-  return out;
 }
 
 async function extractFlipkartData(url) {
@@ -144,60 +137,27 @@ async function extractFlipkartData(url) {
       throw new Error("Flipkart blocked this request with CAPTCHA");
     }
 
-    const extracted = await page.evaluate(() => {
-      const normalize = (u) => (u || "").replace(/&amp;/g, "&").trim();
-      const mainSet = new Set();
-      const thumbSet = new Set();
+    const imageUrls = await page.evaluate(() => {
+      const urls = new Set();
 
-      const addImg = (img, set) => {
-        if (!img) return;
-
-        if (img.src) set.add(normalize(img.src));
+      document.querySelectorAll("img").forEach((img) => {
+        if (img.src) urls.add(img.src);
 
         const srcset = img.getAttribute("srcset");
         if (srcset) {
           srcset.split(",").forEach((part) => {
             const u = part.trim().split(" ")[0];
-            if (u) set.add(normalize(u));
+            if (u) urls.add(u);
           });
         }
-      };
-
-      // Try to find only the primary product media/gallery area
-      const mainGallerySelectors = [
-        'div[class*="_2E1FGS"] img',
-        'div[class*="_3kidJX"] img',
-        'div[class*="_1BweB8"] img',
-        'div[class*="_2r_T1I"] img',
-        'img[class*="_396cs4"]',
-        'img[class*="_2r_T1I"]'
-      ];
-
-      mainGallerySelectors.forEach((selector) => {
-        document.querySelectorAll(selector).forEach((img) => addImg(img, mainSet));
       });
 
-      // Limit thumbnail collection to likely gallery side only
-      const thumbContainers = [
-        'ul img',
-        'li img',
-        'div[class*="_1AuMiq"] img',
-        'div[class*="CXW8mj"] img'
-      ];
+      const htmlText = document.documentElement.outerHTML;
+      const rawMatches =
+        htmlText.match(/https?:\/\/(?:rukmini|rukminim)\d*\.flixcart\.com\/[^"' <>\s)]+/gi) || [];
+      rawMatches.forEach((u) => urls.add(u));
 
-      thumbContainers.forEach((selector) => {
-        document.querySelectorAll(selector).forEach((img) => {
-          const rect = img.getBoundingClientRect();
-          if (rect.width >= 35 && rect.height >= 35 && rect.width <= 250 && rect.height <= 250) {
-            addImg(img, thumbSet);
-          }
-        });
-      });
-
-      return {
-        main: Array.from(mainSet),
-        thumbs: Array.from(thumbSet)
-      };
+      return Array.from(urls);
     });
 
     const metaCandidates = [
@@ -205,55 +165,39 @@ async function extractFlipkartData(url) {
       getMetaContent(html, "twitter:image", "name")
     ].filter(Boolean);
 
-    let mainImages = extracted.main
+    const allCandidates = [...new Set([...imageUrls, ...metaCandidates])]
       .map(cleanUrl)
-      .filter(Boolean)
+      .filter(Boolean);
+
+    const cleaned = [...new Set(allCandidates)]
       .filter(isValidProductImage)
       .sort((a, b) => scoreImage(b) - scoreImage(a));
 
-    mainImages = dedupeImages(mainImages);
+    const finalImages = [];
+    const seenKeys = new Set();
 
-    let thumbImages = extracted.thumbs
-      .map(cleanUrl)
-      .filter(Boolean)
-      .filter(isValidProductImage)
-      .sort((a, b) => scoreImage(b) - scoreImage(a));
+    for (const img of cleaned) {
+      const parts = img.split("/");
+      const fileName = (parts[parts.length - 1] || "").toLowerCase();
+      const key = fileName.replace(/\.(jpg|jpeg|png|webp)$/i, "");
 
-    thumbImages = dedupeImages(thumbImages);
+      if (!key) continue;
+      if (seenKeys.has(key)) continue;
 
-    let metaImages = metaCandidates
-      .map(cleanUrl)
-      .filter(Boolean)
-      .filter(isValidProductImage)
-      .sort((a, b) => scoreImage(b) - scoreImage(a));
-
-    metaImages = dedupeImages(metaImages);
-
-    // STRICT PRIORITY:
-    // 1. main gallery images only
-    // 2. thumbnail gallery images only if needed
-    // 3. meta image only if still needed
-    let finalImages = dedupeImages(mainImages);
-
-    if (finalImages.length < 2) {
-      finalImages = dedupeImages([...finalImages, ...thumbImages]);
+      seenKeys.add(key);
+      finalImages.push(img);
     }
 
-    if (finalImages.length < 1) {
-      finalImages = dedupeImages([...finalImages, ...metaImages]);
-    }
+    const filteredMainImages = finalImages.slice(0, 3);
 
-    // Keep very strict limit to avoid related products
-    finalImages = finalImages.slice(0, 4);
-
-    if (!finalImages.length) {
+    if (!filteredMainImages.length) {
       throw new Error("No valid product images found");
     }
 
     return {
       title,
       finalUrl,
-      images: finalImages
+      images: filteredMainImages
     };
   } finally {
     await browser.close();
